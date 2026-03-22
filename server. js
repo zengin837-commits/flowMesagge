@@ -1,0 +1,340 @@
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode');
+const mongoose = require('mongoose');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  pingTimeout: 60000,
+  pingInterval: 25000
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-panel')
+  .then(() => console.log('MongoDB baglandi'))
+  .catch(err => console.log('MongoDB hatasi:', err));
+
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'gizli-anahtar-2024',
+  resave: false,
+  saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-panel'
+  }),
+  cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 }
+}));
+
+const KullaniciSchema = new mongoose.Schema({
+  kullaniciAdi: { type: String, unique: true },
+  sifre: String,
+  tarih: { type: Date, default: Date.now }
+});
+const Kullanici = mongoose.model('Kullanici', KullaniciSchema);
+
+const KampanyaSchema = new mongoose.Schema({
+  ad: String,
+  mesaj: String,
+  gruplar: [String],
+  aralik: Number,
+  tekrar: Boolean,
+  tekrarAralik: Number,
+  tarih: { type: Date, default: Date.now },
+  durum: { type: String, default: 'bekliyor' },
+  basarili: { type: Number, default: 0 },
+  basarisiz: { type: Number, default: 0 },
+  toplamGonderim: { type: Number, default: 0 }
+});
+const Kampanya = mongoose.model('Kampanya', KampanyaSchema);
+
+function authKontrol(req, res, next) {
+  if (req.session.kullanici) return next();
+  res.redirect('/giris');
+}
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/giris', (req, res) => {
+  if (req.session.kullanici) return res.redirect('/');
+  res.sendFile(path.join(__dirname, 'public/giris.html'));
+});
+
+app.get('/kayit', (req, res) => {
+  if (req.session.kullanici) return res.redirect('/');
+  res.sendFile(path.join(__dirname, 'public/kayit.html'));
+});
+
+app.get('/', authKontrol, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public/index.html'));
+});
+
+app.post('/api/giris', async (req, res) => {
+  try {
+    const { kullaniciAdi, sifre } = req.body;
+    const kullanici = await Kullanici.findOne({ kullaniciAdi });
+    if (!kullanici) return res.json({ basarili: false, mesaj: 'Kullanici bulunamadi' });
+    const eslesti = await bcrypt.compare(sifre, kullanici.sifre);
+    if (!eslesti) return res.json({ basarili: false, mesaj: 'Sifre yanlis' });
+    req.session.kullanici = { id: kullanici._id, kullaniciAdi: kullanici.kullaniciAdi };
+    res.json({ basarili: true });
+  } catch (err) {
+    res.json({ basarili: false, mesaj: 'Sunucu hatasi' });
+  }
+});
+
+app.post('/api/kayit', async (req, res) => {
+  try {
+    const { kullaniciAdi, sifre } = req.body;
+    const mevcut = await Kullanici.findOne({ kullaniciAdi });
+    if (mevcut) return res.json({ basarili: false, mesaj: 'Bu kullanici adi alinmis' });
+    const hash = await bcrypt.hash(sifre, 10);
+    await Kullanici.create({ kullaniciAdi, sifre: hash });
+    res.json({ basarili: true });
+  } catch (err) {
+    res.json({ basarili: false, mesaj: 'Sunucu hatasi' });
+  }
+});
+
+app.post('/api/cikis', (req, res) => {
+  req.session.destroy();
+  res.json({ basarili: true });
+});
+
+let istemciHazir = false;
+let gruplar = [];
+let aktifZamanlamalar = {};
+let baglantiYontemi = 'qr';
+let aktifSocket = null;
+
+const client = new Client({
+  authStrategy: new LocalAuth(),
+  puppeteer: {
+    headless: true,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu'
+    ]
+  }
+});
+
+client.on('qr', async (qr) => {
+  try {
+    const qrDataUrl = await qrcode.toDataURL(qr);
+    io.emit('qr', qrDataUrl);
+    io.emit('durum', { mesaj: 'QR kodu tarayin', tip: 'bekliyor' });
+    console.log('QR kod olusturuldu');
+  } catch (e) {
+    console.log('QR hatasi:', e.message);
+  }
+});
+
+client.on('ready', async () => {
+  istemciHazir = true;
+  io.emit('durum', { mesaj: 'WhatsApp Baglandi', tip: 'basarili' });
+  io.emit('baglandi', true);
+  console.log('WhatsApp baglandi');
+  setTimeout(gruplariYukle, 3000);
+});
+
+client.on('authenticated', () => {
+  io.emit('durum', { mesaj: 'Kimlik dogrulandi', tip: 'bekliyor' });
+  console.log('WhatsApp kimlik dogrulandi');
+});
+
+client.on('auth_failure', (msg) => {
+  istemciHazir = false;
+  io.emit('durum', { mesaj: 'Kimlik dogrulama hatasi', tip: 'hata' });
+  io.emit('baglandi', false);
+  console.log('Auth hatasi:', msg);
+});
+
+client.on('disconnected', (reason) => {
+  istemciHazir = false;
+  gruplar = [];
+  io.emit('durum', { mesaj: 'Baglanti Kesildi', tip: 'hata' });
+  io.emit('baglandi', false);
+  io.emit('gruplar', []);
+  console.log('WhatsApp baglantisi kesildi:', reason);
+  setTimeout(() => client.initialize(), 5000);
+});
+
+client.initialize();
+
+async function gruplariYukle() {
+  try {
+    const sohbetler = await client.getChats();
+    gruplar = sohbetler
+      .filter(c => c.isGroup)
+      .map(g => ({ id: g.id._serialized, isim: g.name }));
+    io.emit('gruplar', gruplar);
+    console.log(gruplar.length + ' grup yuklendi');
+  } catch (err) {
+    console.log('Grup yukleme hatasi:', err.message);
+    setTimeout(gruplariYukle, 10000);
+  }
+}
+
+async function mesajGonderFonk(kampanya, socket) {
+  let basarili = 0;
+  let basarisiz = 0;
+
+  for (let i = 0; i < kampanya.gruplar.length; i++) {
+    const grupId = kampanya.gruplar[i];
+    try {
+      await client.sendMessage(grupId, kampanya.mesaj);
+      basarili++;
+      if (socket) socket.emit('gonderimIlerleme', {
+        tamamlanan: i + 1,
+        toplam: kampanya.gruplar.length,
+        basarili,
+        basarisiz,
+        grupId,
+        durum: 'basarili'
+      });
+    } catch (err) {
+      basarisiz++;
+      if (socket) socket.emit('gonderimIlerleme', {
+        tamamlanan: i + 1,
+        toplam: kampanya.gruplar.length,
+        basarili,
+        basarisiz,
+        grupId,
+        durum: 'hata'
+      });
+    }
+
+    if (i < kampanya.gruplar.length - 1) {
+      await new Promise(r => setTimeout(r, (kampanya.aralik || 3) * 1000));
+    }
+  }
+
+  await Kampanya.findByIdAndUpdate(kampanya._id, {
+    $inc: { basarili, basarisiz, toplamGonderim: 1 },
+    durum: 'tamamlandi'
+  });
+
+  if (socket) socket.emit('gonderimTamamlandi', { basarili, basarisiz });
+  return { basarili, basarisiz };
+}
+
+io.on('connection', (socket) => {
+  aktifSocket = socket;
+
+  if (istemciHazir) {
+    socket.emit('durum', { mesaj: 'WhatsApp Baglandi', tip: 'basarili' });
+    socket.emit('baglandi', true);
+    socket.emit('gruplar', gruplar);
+  } else {
+    socket.emit('durum', { mesaj: 'Bagli Degil', tip: 'hata' });
+    socket.emit('baglandi', false);
+  }
+
+  socket.on('gruplariYenile', async () => {
+    if (!istemciHazir) return socket.emit('hata', 'WhatsApp bagli degil');
+    await gruplariYukle();
+  });
+
+  socket.on('qrYenile', async () => {
+    if (istemciHazir) return;
+    baglantiYontemi = 'qr';
+    try { await client.destroy(); } catch (e) {}
+    setTimeout(() => client.initialize(), 2000);
+  });
+
+  socket.on('telefonBaglan', async (data) => {
+    if (istemciHazir) return;
+    aktifSocket = socket;
+    baglantiYontemi = 'telefon';
+    const telefon = data.telefon.replace(/[^0-9]/g, '');
+    try { await client.destroy(); } catch (e) {}
+    setTimeout(async () => {
+      await client.initialize();
+      setTimeout(async () => {
+        try {
+          const kod = await client.requestPairingCode(telefon);
+          socket.emit('telefonKodu', { kod });
+          io.emit('durum', { mesaj: 'Kodu WhatsApp a girin', tip: 'bekliyor' });
+          console.log('Eslestirme kodu: ' + kod);
+        } catch (err) {
+          socket.emit('telefonHata', 'Kod alinamadi: ' + err.message);
+        }
+      }, 5000);
+    }, 2000);
+  });
+
+  socket.on('kampanyaOlustur', async (data) => {
+    if (!istemciHazir) return socket.emit('hata', 'WhatsApp bagli degil!');
+
+    const kampanya = await Kampanya.create({
+      ad: data.ad,
+      mesaj: data.mesaj,
+      gruplar: data.gruplar,
+      aralik: data.aralik || 3,
+      tekrar: data.tekrar || false,
+      tekrarAralik: data.tekrarAralik || 1,
+      durum: 'devam'
+    });
+
+    socket.emit('gonderimBasladi', { toplam: data.gruplar.length });
+    await mesajGonderFonk(kampanya, socket);
+
+    if (data.tekrar && data.tekrarAralik) {
+      const zamanlamaId = setInterval(async () => {
+        if (!istemciHazir) return;
+        io.emit('tekrarGonderimBasladi', { kampanyaId: kampanya._id, ad: kampanya.ad });
+        await mesajGonderFonk(kampanya, null);
+        io.emit('tekrarGonderimTamamlandi', { kampanyaId: kampanya._id });
+      }, data.tekrarAralik * 60 * 60 * 1000);
+
+      aktifZamanlamalar[kampanya._id] = zamanlamaId;
+      socket.emit('zamanlamaAktif', { kampanyaId: kampanya._id, saat: data.tekrarAralik });
+    }
+  });
+
+  socket.on('zamanlamaDurdur', (kampanyaId) => {
+    if (aktifZamanlamalar[kampanyaId]) {
+      clearInterval(aktifZamanlamalar[kampanyaId]);
+      delete aktifZamanlamalar[kampanyaId];
+      socket.emit('zamanlamaDurduruldu', kampanyaId);
+    }
+  });
+
+  socket.on('raporlariGetir', async () => {
+    const raporlar = await Kampanya.find().sort({ tarih: -1 }).limit(50);
+    socket.emit('raporlar', raporlar);
+  });
+
+  socket.on('istatistikler', async () => {
+    const toplamKampanya = await Kampanya.countDocuments();
+    const gonderilen = await Kampanya.aggregate([{ $group: { _id: null, toplam: { $sum: '$basarili' } } }]);
+    const basarisiz = await Kampanya.aggregate([{ $group: { _id: null, toplam: { $sum: '$basarisiz' } } }]);
+    socket.emit('istatistikler', {
+      toplamKampanya,
+      toplamGonderilen: gonderilen[0] ? gonderilen[0].toplam : 0,
+      toplamBasarisiz: basarisiz[0] ? basarisiz[0].toplam : 0,
+      bagliCihaz: istemciHazir ? 1 : 0,
+      aktifZamanlamalar: Object.keys(aktifZamanlamalar).length
+    });
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log('Server ' + PORT + ' portunda calisiyor');
+});
