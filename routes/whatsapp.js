@@ -173,4 +173,20 @@ router.post('/disconnect', auth, async (req, res) => {
 // Gruplari getir
 router.get('/groups', auth, async (req, res) => {
   try {
-    const sock = global.ac
+    const sock = global.activeSockets[req.user.id];
+    if (!sock) return res.status(400).json({ error: 'WhatsApp bagli degil' });
+    const chats  = await sock.groupFetchAllParticipating();
+    const groups = Object.values(chats).map(g => ({
+      id:      g.id,
+      name:    g.subject,
+      members: g.participants?.length || 0,
+      desc:    g.desc || ''
+    }));
+    res.json({ groups });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+module.exports = { router, startSocket };
+```
