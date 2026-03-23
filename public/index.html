@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>MessageFlow</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d0f14; --surface: #161920; --surface2: #1e2130;
+  --border: #2a2e3f; --green: #25d366; --text: #e8ecf4;
+  --muted: #7b849c; --danger: #ff4d6d; --warn: #f5a623;
+}
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+
+#auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.auth-box { width: 100%; max-width: 400px; background: var(--surface); border: 1px solid var(--border); border-radius: 24px; padding: 36px 28px; }
+.logo { text-align: center; margin-bottom: 32px; }
+.logo h1 { font-size: 28px; font-weight: 800; letter-spacing: -1px; }
+.logo h1 span { color: var(--green); }
+.logo p { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.tab-row { display: flex; background: var(--surface2); border-radius: 10px; padding: 4px; margin-bottom: 24px; }
+.tab { flex: 1; padding: 10px; text-align: center; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; color: var(--muted); transition: all .2s; }
+.tab.active { background: var(--surface); color: var(--text); }
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .6px; }
+.field input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-size: 15px; padding: 13px 15px; outline: none; transition: border-color .2s; }
+.field input:focus { border-color: var(--green); }
+.btn-main { width: 100%; padding: 15px; background: var(--green); border: none; border-radius: 12px; color: #000; font-size: 16px; font-weight: 700; cursor: pointer; margin-top: 8px; transition: all .2s; }
+.btn-main:active { transform: scale(0.98); }
+.err { color: var(--danger); font-size: 13px; text-align: center; margin-top: 12px; min-height: 20px; }
+
+#app-screen { display: none; padding-bottom: 80px; }
+.topbar { position: sticky; top: 0; z-index: 100; background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; }
+.topbar-title { font-size: 18px; font-weight: 800; letter-spacing: -.5px; }
+.topbar-title span { color: var(--green); }
+.badge { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+.badge-ok { background: rgba(37,211,102,.12); color: var(--green); border: 1px solid rgba(37,211,102,.2); }
+.badge-off { background: rgba(255,77,109,.1); color: var(--danger); border: 1px solid rgba(255,77,109,.2); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s infinite; }
+@keyframes pulse { 0%,100%{ opacity:1 } 50%{ opacity:.4 } }
+
+.section { padding: 20px; }
+.section-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 14px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 20px; margin-bottom: 14px; }
+.connect-methods { display: flex; gap: 10px; margin-bottom: 18px; }
+.method-btn { flex: 1; padding: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 14px; cursor: pointer; text-align: center; transition: all .2s; }
+.method-btn.active { border-color: var(--green); color: var(--green); background: rgba(37,211,102,.08); }
+
+#qr-wrap { text-align: center; padding: 10px 0; }
+#qr-wrap img { width: 220px; height: 220px; border-radius: 12px; border: 3px solid var(--green); }
+#qr-hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+
+#phone-wrap input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-size: 16px; padding: 13px 15px; outline: none; margin-bottom: 12px; }
+#pairing-code-box { font-size: 36px; font-weight: 800; letter-spacing: 10px; color: var(--green); text-align: center; padding: 20px; background: rgba(37,211,102,.08); border-radius: 12px; margin-top: 12px; display: none; }
+
+.btn-green { width: 100%; padding: 14px; background: var(--green); border: none; border-radius: 12px; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: all .2s; }
+.btn-green:active { transform: scale(0.98); }
+.btn-red { width: 100%; padding: 12px; background: rgba(255,77,109,.1); border: 1px solid rgba(255,77,109,.2); border-radius: 12px; color: var(--danger); font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 10px; }
+
+.search-wrap { position: relative; margin-bottom: 12px; }
+.search-wrap input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; padding: 12px 15px 12px 40px; outline: none; }
+.search-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 16px; }
+.sel-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.sel-bar span { font-size: 13px; color: var(--muted); }
+.btn-sm { padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 12px; cursor: pointer; }
+
+.group-list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
+.group-list::-webkit-scrollbar { width: 3px; }
+.group-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.group-item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; cursor: pointer; transition: all .2s; }
+.group-item.selected { background: rgba(37,211,102,.07); border-color: rgba(37,211,102,.3); }
+.g-avatar { width: 42px; height: 42px; border-radius: 12px; background: var(--surface2); display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+.g-info { flex: 1; min-width: 0; }
+.g-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.g-meta { font-size: 12px; color: var(--muted); }
+.g-check { width: 24px; height: 24px; border-radius: 7px; border: 2px solid var(--border); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 13px; font-weight: 700; transition: all .2s; }
+.group-item.selected .g-check { background: var(--green); border-color: var(--green); color: #000; }
+
+textarea { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: inherit; font-size: 15px; padding: 14px; resize: none; outline: none; margin-bottom: 6px; line-height: 1.6; }
+textarea:focus { border-color: rgba(37,211,102,.5); }
+.char-count { font-size: 12px; color: var(--muted); text-align: right; margin-bottom: 14px; }
+.delay-row { display: flex; gap: 10px; margin-bottom: 16px; }
+.delay-field { flex: 1; }
+.delay-field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+.delay-field input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-size: 15px; padding: 12px; outline: none; text-align: center; }
+
+.progress-wrap { display: none; margin-bottom: 14px; }
+.progress-info { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.progress-bg { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, #1aab52, var(--green)); border-radius: 3px; width: 0%; transition: width .4s; }
+
+.bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-top: 1px solid var(--border); display: flex; padding: 8px 0; z-index: 100; }
+.nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px; cursor: pointer; color: var(--muted); font-size: 10px; transition: color .2s; border: none; background: none; }
+.nav-btn.active { color: var(--green); }
+.nav-btn svg { width: 22px; height: 22px; }
+
+.page { display: none; }
+.page.active { display: block; }
+
+.toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 20px; font-size: 14px; z-index: 999; opacity: 0; transition: opacity .3s; pointer-events: none; white-space: nowrap; }
+.toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- AUTH -->
+<div id="auth-screen">
+  <div class="auth-box">
+    <div class="logo">
+      <h1>Message<span>Flow</span></h1>
+      <p>WhatsApp Toplu Gönderim Paneli</p>
+    </div>
+    <div class="tab-row">
+      <div class="tab active" onclick="switchAuth('login')">Giriş Yap</div>
+      <div class="tab" onclick="switchAuth('register')">Kayıt Ol</div>
+    </div>
+    <div class="field">
+      <label>Email</label>
+      <input type="email" id="auth-email" placeholder="ornek@email.com">
+    </div>
+    <div class="field">
+      <label>Şifre</label>
+      <input type="password" id="auth-password" placeholder="••••••••">
+    </div>
+    <button class="btn-main" onclick="doAuth()">Devam Et</button>
+    <div class="err" id="auth-err"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app-screen">
+  <div class="topbar">
+    <div class="topbar-title">Message<span>Flow</span></div>
+    <div class="badge badge-off" id="wa-badge">
+      <div class="dot"></div>
+      <span id="wa-status-text">Bağlı Değil</span>
+    </div>
+  </div>
+
+  <!-- BAĞLANTI SAYFASI -->
+  <div class="page active" id="page-connect">
+    <div class="section">
+      <div class="section-title">WhatsApp Bağlantısı</div>
+      <div class="card">
+        <div class="connect-methods">
+          <div class="method-btn active" id="m-qr" onclick="setMethod('qr')">📷 QR Kod</div>
+          <div class="method-btn" id="m-phone" onclick="setMethod('phone')">📱 Telefon Kodu</div>
+        </div>
+
+        <div id="qr-wrap" style="display:none">
+          <img id="qr-img" src="" alt="QR Kod">
+          <div id="qr-hint">WhatsApp'ı aç → Bağlı Cihazlar → Cihaz Ekle → QR'ı tara</div>
+        </div>
+
+        <div id="phone-wrap" style="display:none">
+          <input type="tel" id="phone-input" placeholder="+90 532 000 00 00">
+          <div id="pairing-code-box"></div>
+        </div>
+
+        <button class="btn-green" id="connect-btn" onclick="doConnect()">Bağlan</button>
+        <button class="btn-red" id="disconnect-btn" style="display:none" onclick="doDisconnect()">Bağlantıyı Kes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- GRUPLAR SAYFASI -->
+  <div class="page" id="page-groups">
+    <div class="section">
+      <div class="section-title">Gruplarım</div>
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input type="text" placeholder="Grup ara..." oninput="filterGroups(this.value)">
+      </div>
+      <div class="sel-bar">
+        <span id="sel-info">0 grup seçili</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn-sm" onclick="selectAll()">Tümü</button>
+          <button class="btn-sm" onclick="deselectAll()">Temizle</button>
+          <button class="btn-sm" onclick="loadGroups()">🔄</button>
+        </div>
+      </div>
+      <div class="group-list" id="group-list">
+        <div style="text-align:center;color:var(--muted);padding:40px 0">
+          WhatsApp bağlandıktan sonra gruplarınız burada görünür
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MESAJ SAYFASI -->
+  <div class="page" id="page-message">
+    <div class="section">
+      <div class="section-title">Mesaj Gönder</div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <span style="font-size:13px;color:var(--muted)">Seçili grup: <strong style="color:var(--text)" id="msg-group-count">0</strong></span>
+        </div>
+        <textarea id="msg-text" rows="6" placeholder="Mesajınızı yazın..." oninput="updateCharCount()"></textarea>
+        <div class="char-count"><span id="char-num">0</span> / 4096</div>
+        <div class="delay-row">
+          <div class="delay-field">
+            <label>Min. Bekleme (sn)</label>
+            <input type="number" id="min-delay" value="3" min="1">
+          </div>
+          <div class="delay-field">
+            <label>Max. Bekleme (sn)</label>
+            <input type="number" id="max-delay" value="8" min="1">
+          </div>
+        </div>
+        <div class="progress-wrap" id="progress-wrap">
+          <div class="progress-info">
+            <span id="progress-text">Gönderiliyor...</span>
+            <span id="progress-num">0/0</span>
+          </div>
+          <div class="progress-bg"><div class="progress-fill" id="progress-fill"></div></div>
+        </div>
+        <button class="btn-green" id="send-btn" onclick="doSend()">
+          ✈️ Toplu Gönder
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ALT NAVİGASYON -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" id="nav-connect" onclick="goPage('connect')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M8.111 16.404a5.5 5.5 0 0 1 7.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/></svg>
+      Bağlantı
+    </button>
+    <button class="nav-btn" id="nav-groups" onclick="goPage('groups')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Gruplar
+    </button>
+    <button class="nav-btn" id="nav-message" onclick="goPage('message')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      Gönder
+    </button>
+  </nav>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('mf_token');
+let authMode = 'login';
+let groups = [];
+let selected = new Set();
+let socket = null;
+let waConnected = false;
+let connectMethod = 'qr';
+
+// ── BAŞLANGIÇ ──
+window.onload = () => {
+  if (token) showApp();
+};
+
+// ── AUTH ──
+function switchAuth(mode) {
+  authMode = mode;
+  document.querySelectorAll('.tab-row .tab').forEach((t,i) => {
+    t.classList.toggle('active', (i===0 && mode==='login') || (i===1 && mode==='register'));
+  });
+}
+
+async function doAuth() {
+  const email    = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const errEl    = document.getElementById('auth-err');
+  errEl.textContent = '';
+  if (!email || !password) { errEl.textContent = 'Email ve şifre zorunlu'; return; }
+  try {
+    const res  = await fetch(`${API}/api/auth/${authMode}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error; return; }
+    token = data.token;
+    localStorage.setItem('mf_token', token);
+    showApp();
+  } catch (e) {
+    errEl.textContent = 'Sunucuya bağlanılamadı';
+  }
+}
+
+// ── APP ──
+function showApp() {
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app-screen').style.display  = 'block';
+  initSocket();
+  checkStatus();
+}
+
+function initSocket() {
+  socket = io({ auth: { token } });
+  socket.on('connect',      () => socket.emit('join', token));
+  socket.on('qr',           d  => { document.getElementById('qr-img').src = d.qr; document.getElementById('qr-wrap').style.display='block'; });
+  socket.on('pairing_code', d  => { const el = document.getElementById('pairing-code-box'); el.textContent = d.code; el.style.display='block'; });
+  socket.on('connected',    () => setWaStatus(true));
+  socket.on('disconnected', () => setWaStatus(false));
+  socket.on('send_progress', d => updateProgress(d));
+  socket.on('send_complete', d => {
+    showToast(`✅ Tamamlandı: ${d.sent} başarılı, ${d.failed} hatalı`);
+    document.getElementById('progress-wrap').style.display = 'none';
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('send-btn').textContent = '✈️ Toplu Gönder';
+  });
+}
+
+async function checkStatus() {
+  try {
+    const res  = await apiFetch('/api/whatsapp/status');
+    const data = await res.json();
+    if (data.live || data.session?.status === 'connected') setWaStatus(true);
+  } catch {}
+}
+
+function setWaStatus(ok) {
+  waConnected = ok;
+  const badge = document.getElementById('wa-badge');
+  badge.className = 'badge ' + (ok ? 'badge-ok' : 'badge-off');
+  document.getElementById('wa-status-text').textContent = ok ? 'Bağlı' : 'Bağlı Değil';
+  document.getElementById('disconnect-btn').style.display = ok ? 'block' : 'none';
+  document.getElementById('connect-btn').style.display    = ok ? 'none'  : 'block';
+  if (ok) loadGroups();
+}
+
+// ── BAĞLANTI ──
+function setMethod(m) {
+  connectMethod = m;
+  document.getElementById('m-qr').classList.toggle('active', m==='qr');
+  document.getElementById('m-phone').classList.toggle('active', m==='phone');
+  document.getElementById('qr-wrap').style.display    = 'none';
+  document.getElementById('phone-wrap').style.display = m==='phone' ? 'block' : 'none';
+}
+
+async function doConnect() {
+  try {
+    if (connectMethod === 'qr') {
+      await apiFetch('/api/whatsapp/connect/qr', 'POST');
+      document.getElementById('qr-hint').textContent = 'QR kod yükleniyor...';
+      document.getElementById('qr-wrap').style.display = 'block';
+    } else {
+      const phone = document.getElementById('phone-input').value.trim();
+      if (!phone) { showToast('Telefon numarası girin'); return; }
+      await apiFetch('/api/whatsapp/connect/phone', 'POST', { phone });
+      showToast('📱 Eşleştirme kodu WhatsApp\'a gönderildi');
+    }
+  } catch (e) { showToast('Hata: ' + e.message); }
+}
+
+async function doDisconnect() {
+  await apiFetch('/api/whatsapp/disconnect', 'POST');
+  setWaStatus(false);
+  groups = []; selected.clear();
+  document.getElementById('group-list').innerHTML = '<div style="text-align:center;color:var(--muted);padding:40px 0">Bağlantı kesildi</div>';
+}
+
+// ── GRUPLAR ──
+async function loadGroups() {
+  try {
+    const res  = await apiFetch('/api/whatsapp/groups');
+    const data = await res.json();
+    groups = data.groups || [];
+    renderGroups(groups);
+  } catch (e) { showToast('Gruplar yüklenemedi'); }
+}
+
+function renderGroups(list) {
+  const el = document.getElementById('group-list');
+  if (!list.length) { el.innerHTML = '<div style="text-align:center;color:var(--muted);padding:40px 0">Grup bulunamadı</div>'; return; }
+  el.innerHTML = list.map(g => `
+    <div class="group-item ${selected.has(g.id)?'selected':''}" onclick="toggleGroup('${g.id}')">
+      <div class="g-avatar">👥</div>
+      <div class="g-info">
+        <div class="g-name">${g.name}</div>
+        <div class="g-meta">${g.members} üye</div>
+      </div>
+      <div class="g-check">${selected.has(g.id)?'✓':''}</div>
+    </div>
+  `).join('');
+  updateSelInfo();
+}
+
+function toggleGroup(id) {
+  if (selected.has(id)) selected.delete(id); else selected.add(id);
+  renderGroups(groups);
+}
+
+function selectAll()  { groups.forEach(g => selected.add(g.id));  renderGroups(groups); }
+function deselectAll(){ selected.clear(); renderGroups(groups); }
+
+function filterGroups(v) {
+  renderGroups(groups.filter(g => g.name.toLowerCase().includes(v.toLowerCase())));
+}
+
+function updateSelInfo() {
+  document.getElementById('sel-info').textContent    = selected.size + ' grup seçili';
+  document.getElementById('msg-group-count').textContent = selected.size;
+}
+
+// ── MESAJ ──
+function updateCharCount() {
+  document.getElementById('char-num').textContent = document.getElementById('msg-text').value.length;
+}
+
+async function doSend() {
+  if (!waConnected)     { showToast('❌ WhatsApp bağlı değil'); return; }
+  if (!selected.size)   { showToast('❌ En az bir grup seçin'); goPage('groups'); return; }
+  const message = document.getElementById('msg-text').value.trim();
+  if (!message)         { showToast('❌ Mesaj boş olamaz'); return; }
+
+  const minDelay = parseInt(document.getElementById('min-delay').value) * 1000;
+  const maxDelay = parseInt(document.getElementById('max-delay').value) * 1000;
+
+  document.getElementById('send-btn').disabled    = true;
+  document.getElementById('send-btn').textContent = '⏳ Gönderiliyor...';
+  document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('progress-fill').style.width   = '0%';
+  document.getElementById('progress-num').textContent    = `0/${selected.size}`;
+
+  try {
+    await apiFetch('/api/messages/send', 'POST', {
+      groups: [...selected],
+      message,
+      minDelay,
+      maxDelay
+    });
+  } catch (e) {
+    showToast('Hata: ' + e.message);
+    document.getElementById('send-btn').disabled = false;
+  }
+}
+
+function updateProgress(d) {
+  const pct = Math.round(((d.sent + d.failed) / d.total) * 100);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-num').textContent  = `${d.sent + d.failed}/${d.total}`;
+  document.getElementById('progress-text').textContent = d.status === 'ok' ? '✅ Gönderildi' : '❌ Hata';
+}
+
+// ── NAV ──
+function goPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.getElementById('nav-'  + name).classList.add('active');
+}
+
+// ── YARDIMCI ──
+function apiFetch(url, method='GET', body=null) {
+  return fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+    body: body ? JSON.stringify(body) : undefined
+  });
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+</script>
+</body>
+</html>
