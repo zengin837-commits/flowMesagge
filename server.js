@@ -37,6 +37,12 @@ io.on('connection', socket => {
       socket.join(user.id.toString());
       console.log('Kullanici odaya katildi:', user.id.toString());
       socket.emit('joined', { userId: user.id });
+
+      // Bekleyen QR varsa hemen gönder
+      const active = global.activeSockets[user.id];
+      if (active?.lastQR) {
+        socket.emit('qr', { qr: active.lastQR });
+      }
     } catch(e) {
       console.log('Join hatasi:', e.message);
     }
