@@ -5,104 +5,140 @@ const qrcode  = require('qrcode');
 const path    = require('path');
 const fs      = require('fs');
 
+let Baileys;
+try {
+  Baileys = require('@whiskeysockets/baileys');
+} catch(e) {
+  Baileys = require('@adiwajshing/baileys');
+}
+
 const {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
+} = Baileys;
+
 const { Boom } = require('@hapi/boom');
-const pino    = require('pino');
+const pino = require('pino');
 
 async function startSocket(userId, method, phoneNumber) {
-  const authFolder = path.join(__dirname, '../sessions', userId.toString());
-  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
+  try {
+    const authFolder = path.join('/tmp/sessions', userId.toString());
+    if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  const { version }          = await fetchLatestBaileysVersion();
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+    const { version } = await fetchLatestBaileysVersion();
 
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    mobile: method === 'phone'
-  });
+    console.log('Baileys version:', version);
 
-  global.activeSockets[userId] = sock;
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      logger: pino({ level: 'silent' }),
+      printQRInTerminal: true,
+      browser: ['MessageFlow', 'Chrome', '1.0.0'],
+    });
 
-  await Session.findOneAndUpdate(
-    { userId },
-    { userId, status: 'pending', authFolder },
-    { upsert: true, new: true }
-  );
+    global.activeSockets[userId] = sock;
 
-  if (method === 'phone' && phoneNumber && !sock.authState.creds.registered) {
-    setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(phoneNumber.replace(/\D/g, ''));
-        global.io.to(userId.toString()).emit('pairing_code', { code });
-      } catch (e) {
-        global.io.to(userId.toString()).emit('error', { message: e.message });
+    await Session.findOneAndUpdate(
+      { userId },
+      { userId, status: 'pending', authFolder },
+      { upsert: true, new: true }
+    );
+
+    if (method === 'phone' && phoneNumber && !sock.authState.creds.registered) {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(phoneNumber.replace(/\D/g, ''));
+          console.log('Pairing code:', code);
+          global.io.to(userId.toString()).emit('pairing_code', { code });
+        } catch (e) {
+          console.error('Pairing code error:', e.message);
+          global.io.to(userId.toString()).emit('error', { message: e.message });
+        }
+      }, 3000);
+    }
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      console.log('Connection update:', connection, qr ? 'QR var' : 'QR yok');
+
+      if (qr) {
+        try {
+          const qrImage = await qrcode.toDataURL(qr);
+          console.log('QR olusturuldu, socket gonderiliyor:', userId);
+          global.io.to(userId.toString()).emit('qr', { qr: qrImage });
+          await Session.findOneAndUpdate({ userId }, { status: 'qr_ready' });
+        } catch (e) {
+          console.error('QR olusturma hatasi:', e.message);
+        }
       }
-    }, 3000);
+
+      if (connection === 'open') {
+        console.log('WhatsApp baglandi:', userId);
+        await Session.findOneAndUpdate({ userId }, { 
+          status: 'connected', 
+          phone: sock.user?.id 
+        });
+        global.io.to(userId.toString()).emit('connected', { phone: sock.user?.id });
+      }
+
+      if (connection === 'close') {
+        const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        console.log('Baglanti kapandi, kod:', code);
+        await Session.findOneAndUpdate({ userId }, { status: 'disconnected' });
+        global.io.to(userId.toString()).emit('disconnected', {});
+        delete global.activeSockets[userId];
+
+        if (code !== DisconnectReason.loggedOut) {
+          console.log('Yeniden baglaniliyor...');
+          setTimeout(() => startSocket(userId, 'qr'), 5000);
+        }
+      }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+    return sock;
+
+  } catch(e) {
+    console.error('startSocket hatasi:', e.message);
+    throw e;
   }
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr && method === 'qr') {
-      try {
-        const qrImage = await qrcode.toDataURL(qr);
-        global.io.to(userId.toString()).emit('qr', { qr: qrImage });
-        await Session.findOneAndUpdate({ userId }, { status: 'qr_ready' });
-      } catch (e) { console.error(e); }
-    }
-
-    if (connection === 'open') {
-      await Session.findOneAndUpdate({ userId }, { status: 'connected', phone: sock.user?.id });
-      global.io.to(userId.toString()).emit('connected', { phone: sock.user?.id });
-    }
-
-    if (connection === 'close') {
-      const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      await Session.findOneAndUpdate({ userId }, { status: 'disconnected' });
-      global.io.to(userId.toString()).emit('disconnected', {});
-      delete global.activeSockets[userId];
-
-      if (code !== DisconnectReason.loggedOut) {
-        setTimeout(() => startSocket(userId, 'qr'), 5000);
-      }
-    }
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-  return sock;
 }
 
-// QR ile bağlan
+// QR ile baglan
 router.post('/connect/qr', auth, async (req, res) => {
   try {
     const userId = req.user.id;
-    if (global.activeSockets[userId])
-      return res.json({ message: 'Zaten bağlanıyor' });
+    console.log('QR baglantisi istendi:', userId);
+
+    if (global.activeSockets[userId]) {
+      delete global.activeSockets[userId];
+    }
+
     await startSocket(userId, 'qr');
-    res.json({ message: 'QR bekleniyor...' });
+    res.json({ message: 'QR olusturuluyor...' });
   } catch (e) {
+    console.error('connect/qr hatasi:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Telefon kodu ile bağlan
+// Telefon kodu ile baglan
 router.post('/connect/phone', auth, async (req, res) => {
   try {
     const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Telefon numarası zorunlu' });
+    if (!phone) return res.status(400).json({ error: 'Telefon numarasi zorunlu' });
     const userId = req.user.id;
-    if (global.activeSockets[userId])
-      return res.json({ message: 'Zaten bağlanıyor' });
+
+    if (global.activeSockets[userId]) {
+      delete global.activeSockets[userId];
+    }
+
     await startSocket(userId, 'phone', phone);
-    res.json({ message: 'Eşleştirme kodu gönderiliyor...' });
+    res.json({ message: 'Eslestirme kodu gonderiliyor...' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -119,37 +155,22 @@ router.get('/status', auth, async (req, res) => {
   }
 });
 
-// Bağlantıyı kes
+// Baglantıyi kes
 router.post('/disconnect', auth, async (req, res) => {
   try {
     const sock = global.activeSockets[req.user.id];
     if (sock) {
-      await sock.logout();
+      try { await sock.logout(); } catch(e) {}
       delete global.activeSockets[req.user.id];
     }
     await Session.findOneAndUpdate({ userId: req.user.id }, { status: 'disconnected' });
-    res.json({ message: 'Bağlantı kesildi' });
+    res.json({ message: 'Baglanti kesildi' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Grupları getir
+// Gruplari getir
 router.get('/groups', auth, async (req, res) => {
   try {
-    const sock = global.activeSockets[req.user.id];
-    if (!sock) return res.status(400).json({ error: 'WhatsApp bağlı değil' });
-    const chats  = await sock.groupFetchAllParticipating();
-    const groups = Object.values(chats).map(g => ({
-      id:      g.id,
-      name:    g.subject,
-      members: g.participants?.length || 0,
-      desc:    g.desc || ''
-    }));
-    res.json({ groups });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-module.exports = { router, startSocket };
+    const sock = global.ac
