@@ -46,11 +46,3 @@ server.listen(PORT, () => console.log(`🚀 Sunucu ${PORT} portunda çalışıyo
 ```
 
 ---
-
-## Railway'e Deploy
-
-Railway'de şu **Environment Variables** ekle:
-```
-MONGO_URI = mongodb://...
-JWT_SECRET = uzun_gizli_anahtar
-PORT = 3000
