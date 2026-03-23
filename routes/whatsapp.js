@@ -19,8 +19,11 @@ async function startSocket(userId, method, phoneNumber) {
     printQRInTerminal: true,
     browser: ['MessageFlow', 'Chrome', '1.0.0'],
   });
-  global.activeSockets[userId] = sock;
+
+  global.activeSockets[userId] = { sock, lastQR: null };
+
   await Session.findOneAndUpdate({ userId }, { userId, status: 'pending', authFolder }, { upsert: true, new: true });
+
   if (method === 'phone' && phoneNumber && !sock.authState.creds.registered) {
     setTimeout(async () => {
       try {
@@ -31,19 +34,29 @@ async function startSocket(userId, method, phoneNumber) {
       }
     }, 3000);
   }
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
+
     if (qr) {
       try {
         const qrImage = await qrcode.toDataURL(qr);
+        if (global.activeSockets[userId]) {
+          global.activeSockets[userId].lastQR = qrImage;
+        }
         global.io.to(userId.toString()).emit('qr', { qr: qrImage });
         await Session.findOneAndUpdate({ userId }, { status: 'qr_ready' });
       } catch (e) { console.error('QR hatasi:', e.message); }
     }
+
     if (connection === 'open') {
+      if (global.activeSockets[userId]) {
+        global.activeSockets[userId].lastQR = null;
+      }
       await Session.findOneAndUpdate({ userId }, { status: 'connected', phone: sock.user?.id });
       global.io.to(userId.toString()).emit('connected', { phone: sock.user?.id });
     }
+
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       await Session.findOneAndUpdate({ userId }, { status: 'disconnected' });
@@ -54,13 +67,18 @@ async function startSocket(userId, method, phoneNumber) {
       }
     }
   });
+
   sock.ev.on('creds.update', saveCreds);
   return sock;
 }
+
 router.post('/connect/qr', auth, async (req, res) => {
   try {
     const userId = req.user.id;
-    if (global.activeSockets[userId]) delete global.activeSockets[userId];
+    if (global.activeSockets[userId]) {
+      try { global.activeSockets[userId].sock?.end(); } catch(e) {}
+      delete global.activeSockets[userId];
+    }
     await startSocket(userId, 'qr');
     res.json({ message: 'QR olusturuluyor...' });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -71,7 +89,10 @@ router.post('/connect/phone', auth, async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ error: 'Telefon numarasi zorunlu' });
     const userId = req.user.id;
-    if (global.activeSockets[userId]) delete global.activeSockets[userId];
+    if (global.activeSockets[userId]) {
+      try { global.activeSockets[userId].sock?.end(); } catch(e) {}
+      delete global.activeSockets[userId];
+    }
     await startSocket(userId, 'phone', phone);
     res.json({ message: 'Eslestirme kodu gonderiliyor...' });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -87,9 +108,9 @@ router.get('/status', auth, async (req, res) => {
 
 router.post('/disconnect', auth, async (req, res) => {
   try {
-    const sock = global.activeSockets[req.user.id];
-    if (sock) {
-      try { await sock.logout(); } catch(e) {}
+    const active = global.activeSockets[req.user.id];
+    if (active?.sock) {
+      try { await active.sock.logout(); } catch(e) {}
       delete global.activeSockets[req.user.id];
     }
     await Session.findOneAndUpdate({ userId: req.user.id }, { status: 'disconnected' });
@@ -99,9 +120,9 @@ router.post('/disconnect', auth, async (req, res) => {
 
 router.get('/groups', auth, async (req, res) => {
   try {
-    const sock = global.activeSockets[req.user.id];
-    if (!sock) return res.status(400).json({ error: 'WhatsApp bagli degil' });
-    const chats = await sock.groupFetchAllParticipating();
+    const active = global.activeSockets[req.user.id];
+    if (!active?.sock) return res.status(400).json({ error: 'WhatsApp bagli degil' });
+    const chats = await active.sock.groupFetchAllParticipating();
     const groups = Object.values(chats).map(g => ({
       id: g.id, name: g.subject,
       members: g.participants?.length || 0,
